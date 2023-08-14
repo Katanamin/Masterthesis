@@ -1,0 +1,253 @@
+import os
+import glob
+import csv
+import argparse
+import numpy as np
+import math
+import statistics
+from scipy.optimize import curve_fit
+from numpy import arange
+import matplotlib
+from matplotlib import pyplot as plt
+
+
+# routine to parse 3 arguments to the program. The input folder is the folder containing .asc files	#
+# which are raw data from the HEKA patchmaster software												#
+# it scans through every -asc file in the folder and analyses is									   #
+########################################################################################################+
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('input_folder', help='folder name where ASCII files are located', type=str)
+parser.add_argument('output_file1', help='extracts voltage, capacitance and current traces into new text file', type=str)
+parser.add_argument('output_file2', help='creates parameters (Time, C0, Ebound, Erev, Voltage, Current in new text file', type=str)
+args = parser.parse_args()
+
+# Initialisation of the variables used #
+########################################
+
+suffix = 0 # suffix for the Plot.png files to create Plot1.png, Plot2.png and so on
+offset = 0 # x-offset of the parabular fit of the boundary potential measurements, corresponds to the boundary potential difference
+c_0 = 0 # minimum of the parabular fit, corresponds to the membrane capacitance at maximally relaxed state
+b = 0 # curvature of the parabula, corresponds to alpha
+incident_number = 30 # the number of data points that get averaged later on to create a simple moving average.
+
+
+Erev_ideal = -20. # measurements were done here with a reversal potential of -20 mV on gramicidin channels
+time_CM_index = 5	   ###################################################################
+voltage_index = 1	   # 
+capacity_index = 2	  # index of respective data in terms of columns in the .asc files
+Mean_current_index = 4  #
+time_index = 1		  ###################################################################
+
+
+writeflag = True # in case only the cosmetics of the graph are altered and the data stays the same anyways
+				 # reduces running time in such a case
+
+
+content = 'overlayed'  # Data contains of two subsets with differrent analysis,
+# so it breaks with this keyword for the first analysis. 'overlayed' is just a word in the raw .asc file, that splits the data nicely
+Seriescount = 0 # suffix to count the number of performed measurement series in the newly created file made by output_file1
+exception_chars = '#_",OS' Some # a clunky way of ensuring that the file gets split up correctly into the right rows
+
+
+def get_asc_file(folderpath: str):
+	# Search for all files ending in '*.asc' in the folder folderpath
+	# and sort the list
+	file_paths = sorted(glob.glob(os.path.join(folderpath, '**', '*.asc'),
+								  recursive=True))
+	# Loop through all files
+	for filepath in file_paths:
+		# Open each file in read mode and get its content
+		with open(filepath, 'r') as fh:
+			filecontent = fh.read()
+		# Yield one file content per iteration
+		yield os.path.basename(filepath), filecontent
+
+c = 1. # initialises parameters for ErevOverTime()
+f = 1.
+def ErevOverTime(x, c, f):  # IV-Curve fit
+	return c * x + f
+
+
+DC_Voltage = 'DC_Voltage'
+Capacitance = 'Capacitance'
+DC_Current = 'DC_Current'
+filepaths = sorted(glob.glob(os.path.join(args.input_folder, '**', '*.asc'), recursive=True))
+next_asc_file = get_asc_file(folderpath=args.input_folder)
+
+if writeflag == True: #Just a switch in case previously created data should be used for plotting
+	with open(os.path.abspath(args.output_file1), 'w', newline='\n') as csvfile:  # Header of new file in write mode 
+		pass
+	for u in range(0, len(filepaths)):  # number of ascii files and,therefore series
+		with open(os.path.abspath(args.output_file1), 'a', newline='\n') as csvfile:
+			csvwriter = csv.writer(csvfile, delimiter=' ')
+			_ = csvwriter.writerow(['Series', u + 1])
+			_ = csvwriter.writerow(
+				[DC_Voltage, Capacitance, DC_Current])  # introduces a "split" character into the new list
+		asc_content = next(next_asc_file) # reads out the raw .asc file
+		asc_series = asc_content[1].split('Series')  # splits the file into the measurement series performed and stores it in a list
+		with open(os.path.abspath(args.output_file1), 'a', newline='\n') as csvfile:
+			csvwriter = csv.writer(csvfile, delimiter=' ')
+			for j in range(1, len(asc_series)):  # iterates over all ascii files
+				lines = asc_series[j].split('\n') # splits the file further into every line 
+				data_array_median = np.zeros((4, 1), dtype=float) # creates a numpy array where the relevant data is stored in memory
+				Seriescount += 1
+				for k in range(0, len(lines)):
+					split_lines = str(lines[k].strip()) # strips the lines of any whitespace chars
+					if content in split_lines:
+						# content is defined at the beginning; see description there, does not look at the data further after that
+						break
+					if not split_lines or split_lines[0].strip() in exception_chars: # ignores the current line if it does not contain relevant data
+						pass
+					else:
+						split_lines_split = split_lines.strip().split(',') # splits each line into the columns and stores every entry in a list
+						if split_lines_split[
+							capacity_index].strip() == "NAN":  # in case an invalid data point is in there
+							pass
+						elif split_lines_split[
+							capacity_index].strip() == "":  # dont know if nessecary but maybe cuts off loop at end of file
+							break
+						else: # stores the respective values into the corresponding variables as indexed in the initialising part above
+							voltage = float(split_lines_split[voltage_index].strip())
+							capacity = float(split_lines_split[capacity_index].strip())
+							MeanCurrent = float(split_lines_split[Mean_current_index].strip())
+							time_CM = float(split_lines_split[time_CM_index].strip())
+
+							_ = csvwriter.writerow((voltage, ",", capacity, ",", MeanCurrent, ",", time_CM))
+				_ = csvwriter.writerow(['%', Seriescount])
+
+# Following code creates images of every parable and outputs a list of relevent values of each of them
+#	(for instance offset)
+dirname = os.path.dirname(__file__)
+filename = os.path.join(dirname, 'PlotsErevEboundOverTime') # creates a folder in the current directory with this name in case it doesnot exist already
+if not os.path.exists(filename):
+	os.mkdir(filename)
+with open(args.output_file1, 'r') as CmM: # reads the first file which is outputted which is basically a more condensed file which can be handled more easily with a human eye
+	content = CmM.read() # stores the file content as a string
+Combined_files = content.split('Series') #splits the content by the 'Series' keyword, creating a list of series measured
+with open(args.output_file2, 'w', newline='\n') as csvfile:  # Initialises the second output file which will contain fit parameter of boundary potential measurements and reversal potential measurements
+	csvwriter = csv.writer(csvfile, delimiter=' ')
+	_ = csvwriter.writerow(['#offset', 'c_0', 'b', 'Erev', 'time'])
+for combined_file_number in range(1, len(Combined_files)):  # iterates over all data of all  measurement files
+	Seperated_files = Combined_files[combined_file_number] #takes every series after another individually
+	Median_asc_files = Seperated_files.split(
+		'%')  # the textfile is split by the keyword "%"
+	Median_asc_files = Median_asc_files[1:] # just takes the entry in the list, that contains the data
+	Erev_Ebound_np = np.zeros((10, len(Median_asc_files) - 1), dtype=np.float64) # creates an array for the storage of relevat data from the raw .asc files.
+	Time_incident_np = np.zeros((7, len(Median_asc_files) - 2 - incident_number), dtype=np.float64) # creates a different storage array for the median data points for
+	#moving average
+	
+	
+	erev_aver = 0.	  #
+	RGes_aver = 0.	  # initialises the average of all the values after each series 
+	RMemb_aver = 0.	 #
+	RSeal_aver = 0.	 #
+	
+	
+	for p in range(len(Median_asc_files) - 1):
+		Median_series = Median_asc_files[p].split('\n')
+		xy_axis = np.zeros((4, len(Median_series) - 2), dtype=np.float64)
+		for i in range(1, len(Median_series) - 1):
+			Median_lines = Median_series[i].split('\n')
+			Median_entries = Median_lines[0].split(',')
+			xy_axis[0][i - 1] = float(Median_entries[0]) * 1000.  # x-axis entries
+			xy_axis[1][i - 1] = float(Median_entries[1]) * 1e12  # y-axis entries
+			xy_axis[2][i - 1] = float(Median_entries[2]) * 1e12  # y-axis entries
+			xy_axis[3][i - 1] = float(Median_entries[3])
+
+
+
+		def parable(x, offset, c_0, b):  # fit the capacitance for boundary potential measurements
+			return c_0 + (x - offset) ** 2 * b
+
+
+		def IVcurve(x, a, d):  # IVCurve fit for reversal potential measurements
+			return a * x + d
+
+
+		plt.rcParams['font.size'] = '15'
+		popt2, _ = curve_fit(IVcurve, xy_axis[0], xy_axis[2])
+		# popt, _ = curve_fit(parable, xy_axis[0], xy_axis[1]) # not used here
+		popt = 1, 1, 1 # is set to a random initialized state since boundary potential measurements are not used for fitting
+		a, d = popt2
+		Erev = -d / a
+		RGes = 1.0/a
+		R_Ratio = Erev/Erev_ideal 
+		R_Access = 5 # Access Resistance (MOhm)
+		R_Memb = (RGes*1000.0 - R_Access)/R_Ratio
+		R_Seal = R_Ratio*R_Memb/(1-R_Ratio)
+		offset, c_0, b = popt
+		Erev_Ebound_np[0][p] = Erev
+		Erev_Ebound_np[1][p] = offset
+		Erev_Ebound_np[2][p] = statistics.mean(xy_axis[3])
+		Erev_Ebound_np[3][p] = RGes * 1000.0
+		Erev_Ebound_np[4][p] = R_Memb
+		Erev_Ebound_np[5][p] = R_Seal
+		
+		#initialisation of incident average
+		if p < int(incident_number):
+			erev_aver += Erev_Ebound_np[0][p]
+			RGes_aver += Erev_Ebound_np[3][p]
+			RMemb_aver += Erev_Ebound_np[4][p]
+			RSeal_aver += Erev_Ebound_np[5][p]
+		elif p == int(incident_number):
+			Erev_Ebound_np[6][p] = erev_aver/(incident_number)
+			Erev_Ebound_np[7][p] = RGes_aver / (incident_number)
+			Erev_Ebound_np[8][p] = RMemb_aver / incident_number
+			Erev_Ebound_np[9][p] = RSeal_aver / incident_number
+		elif p > int(incident_number):
+			erev_aver-= Erev_Ebound_np[0][p-int(incident_number)]
+			erev_aver+= Erev_Ebound_np[0][p]
+			RGes_aver -= Erev_Ebound_np[3][p - int(incident_number)]
+			RGes_aver += Erev_Ebound_np[3][p]
+			RMemb_aver-= Erev_Ebound_np[4][p - incident_number]
+			RMemb_aver += Erev_Ebound_np[4][p]
+			RSeal_aver -= Erev_Ebound_np[5][p - int(incident_number)]
+			RSeal_aver += Erev_Ebound_np[5][p]
+			Time_incident_np[0][p - incident_number - 1] = Erev_Ebound_np[2][p-int(incident_number/2)] # Time for incident average
+			Time_incident_np[1][p - incident_number - 1] = erev_aver/(incident_number) # Erev for incident average
+			Time_incident_np[2][p - incident_number - 1] = RGes_aver / (incident_number) #RGes for incident average
+			Time_incident_np[3][p - incident_number - 1] = RMemb_aver / (incident_number)
+			Time_incident_np[4][p - incident_number - 1] = RSeal_aver / (incident_number)
+
+		pop_all = offset, c_0, b * 10 ** 6, -d / a, statistics.mean(xy_axis[3])
+		with open(args.output_file2, 'a', newline='\n') as csvfile:
+			csvwriter = csv.writer(csvfile, delimiter=' ')
+			_ = csvwriter.writerow(pop_all)
+			
+	 # following routine creates the graphs	   
+	fig, axs = plt.subplots(2, 2, figsize=(14, 8))
+	fig.subplots_adjust(bottom=0.15, left=0.2)
+	axs[0][0].set(xlabel='Time(s)', ylabel='ERev(mV)')
+	axs[0][1].set(xlabel='Time(s)', ylabel='RGes(MOhm)')
+	axs[1][0].set(xlabel='Time(s)', ylabel='RMemb(MOhm)')
+	axs[1][1].set(xlabel='Time(s)', ylabel='Seal(MOhm)')
+	x3_line = Erev_Ebound_np[2] #Time averaged over one sweep
+	y3_line = Erev_Ebound_np[0] # ERev
+	y2_line = Erev_Ebound_np[3] #Rges
+	y4_line = Erev_Ebound_np[4] #RMemb
+	y5_line = Erev_Ebound_np[5] #RSeal
+	x6_line = Time_incident_np[0]
+	y6_line = Time_incident_np[1] #Average over erev
+	y7_line = Time_incident_np[2]  # Average over RGes
+	y8_line = Time_incident_np[3] # Average over RMemb
+	y9_line = Time_incident_np[4] # Average over RSeal
+	pop3 = curve_fit(ErevOverTime, x3_line, y3_line)
+	c, f = pop3[0]
+	yfit_line = ErevOverTime(x3_line, c, f)
+	axs[0][0].scatter(x3_line, y3_line, color='black', lw=4)
+	axs[0][0].plot(x6_line, y6_line, '.r-', lw=2)
+	axs[0][1].scatter(x3_line, y2_line, color='black', lw=4)
+	axs[0][1].plot(x6_line, y7_line, '.r-', lw=2)
+	axs[1][0].scatter(x3_line, y4_line, color='black', lw=4)
+	axs[1][0].plot(x6_line, y8_line, '.r-', lw=2)
+	axs[1][1].scatter(x3_line, y5_line, color='black', lw=4)
+	axs[1][1].plot(x6_line, y9_line, '.r-', lw=2)
+	if f<0:
+		plt.text(.1, .9, r'${:.4f} \cdot x {:.4f}$ '.format(c, f),transform=axs[0][0].transAxes)
+	else:
+		plt.text(.1, .9, r'${:.4f} \cdot x + {:.4f}$ '.format(c, f), transform=axs[0][0].transAxes)
+	suffix += 1 # names the exported plot images plot#.png
+	plt.savefig(os.path.join(filename, 'Plot' + str(suffix) + '.png'))
+	plt.clf()
